@@ -55,6 +55,20 @@ GameBoard::GameBoard() : isWhiteTurn(true) {
     }
 }
 
+GameBoard::GameBoard(const GameBoard& other) {
+    isWhiteTurn = other.isWhiteTurn;
+
+    for (int i = 0; i < 8; ++i) {
+        for (int j = 0; j < 8; ++j) {
+            if (other.board[i][j] != nullptr) {
+                board[i][j] = other.board[i][j]->clone();  // קריאה לפונקציה וירטואלית clone()
+            } else {
+                board[i][j] = nullptr;
+            }
+        }
+    }
+}
+
 
 GameBoard::~GameBoard() {
     for (int i = 0; i < 8; ++i)
@@ -174,7 +188,7 @@ bool GameBoard::isOwnKingInCheckAfterMove(int fromRow, int fromCol, int toRow, i
     }
 
     if (kingRow == -1 || kingCol == -1) {
-        std::cerr << "[ERROR] King not found on board after move!\n";
+        // std::cerr << "[ERROR] King not found on board after move!\n";
         return false;  
     }
 
@@ -475,3 +489,158 @@ void GameBoard::undoMove(int fromRow, int fromCol, int toRow, int toCol, Piece* 
     board[fromRow][fromCol] = movedPiece;
     board[toRow][toCol] = capturedPiece;
 }
+
+std::vector<std::pair<int, int>> GameBoard::getPlayerPieces(bool isWhite) const {
+    std::vector<std::pair<int, int>> positions;
+    for (int row = 0; row < 8; ++row) {
+        for (int col = 0; col < 8; ++col) {
+            Piece* piece = board[row][col];
+            if (piece != nullptr && piece->getIsWhite() == isWhite) {
+                positions.emplace_back(row, col);
+            }
+        }
+    }
+    return positions;
+}
+
+MoveScore GameBoard::getBestMoveMultithreaded(int depth, int numThreads) {
+    std::vector<std::pair<int, int>> pieces = getPlayerPieces(isWhiteTurn);
+    std::mutex resultsMutex;
+    std::vector<MoveScore> allMoves;
+
+    std::atomic<int> tasksRemaining = pieces.size();
+    std::condition_variable allDone;
+    std::mutex cvMutex;
+
+    ThreadPool pool(numThreads); 
+
+    for (const auto& [row, col] : pieces) {
+        pool.enqueue([&, row, col]() {
+            GameBoard localBoard = *this;
+            Piece* piece = localBoard.getPiece(row, col);
+            if (!piece) {
+                if (--tasksRemaining == 0) {
+                    std::lock_guard<std::mutex> lock(cvMutex);
+                    allDone.notify_one();
+                }
+                return;
+            }
+
+            std::vector<std::pair<int, int>> moves = piece->getLegalMoves(row, col, localBoard.board);
+            MoveScore bestMove = { { -1, -1, -1, -1 }, std::numeric_limits<int>::min() };
+
+            for (const auto& [toRow, toCol] : moves) {
+                if (localBoard.isOwnKingInCheckAfterMove(row, col, toRow, toCol)) {
+                    continue;
+                }
+
+                Piece* captured = localBoard.getPiece(toRow, toCol);
+                localBoard.movePiece(row, col, toRow, toCol);
+
+                int score = localBoard.minimax(depth - 1, !isWhiteTurn).score;
+
+                if (score > bestMove.score) {
+                    bestMove = { {row, col, toRow, toCol}, score };
+                }
+
+                localBoard.undoMove(row, col, toRow, toCol, piece, captured);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(resultsMutex);
+                if (bestMove.move.fromRow != -1) {
+                    allMoves.push_back(bestMove);
+                }
+            }
+
+            if (--tasksRemaining == 0) {
+                std::lock_guard<std::mutex> lock(cvMutex);
+                allDone.notify_one();
+            }
+        });
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(cvMutex);
+        allDone.wait(lock, [&]() { return tasksRemaining == 0; });
+    }
+
+    if (allMoves.empty()) {
+        return { { -1, -1, -1, -1 }, isWhiteTurn ? -10000 : 10000 };
+    }
+
+    MoveScore bestOverall = allMoves[0];
+    for (const auto& move : allMoves) {
+        if (move.score > bestOverall.score) {
+            bestOverall = move;
+        }
+    }
+
+    return bestOverall;
+}
+
+void GameBoard::runAutoGame(Chess& chess, int depth, int numThreads) {
+    using namespace std::chrono;
+
+    std::unordered_map<std::string, int> positionCount; 
+
+    auto start = high_resolution_clock::now();
+
+    MoveScore best = getBestMoveMultithreaded(depth, numThreads);
+    std::string res = chess.getInput(best.move, true);
+
+    for ( int i = 0 ; i < 8 && res != "exit" ; i++) {
+        int codeResponse = handleMove(res);
+        chess.setCodeResponse(codeResponse);
+
+      
+        std::string positionHash = getCurrentPositionHash(); 
+
+        positionCount[positionHash]++;
+        if (positionCount[positionHash] >= 3) {
+            std::cout << "Draw detected due to three repetition." << std::endl;
+            break;
+        }
+
+        best = getBestMoveMultithreaded(depth, numThreads);
+        res = chess.getInput(best.move, true);
+    }
+
+    auto end = high_resolution_clock::now();
+    auto duration = duration_cast<milliseconds>(end - start);
+    std::cout << "Auto game took " << duration.count() << " milliseconds." << std::endl;
+}
+
+
+std::string GameBoard::getCurrentPositionHash() {
+    std::string hash;
+
+    for (int row = 0; row < 8; row++) {
+        int emptyCount = 0;
+        for (int col = 0; col < 8; col++) {
+            Piece* piece = board[row][col];
+            if (piece == nullptr) {
+                emptyCount++;
+            } else {
+                
+                if (emptyCount > 0) {
+                    hash += std::to_string(emptyCount);
+                    emptyCount = 0;
+                }
+               
+                hash += piece->getSymbol();  
+            }
+        }
+        if (emptyCount > 0) {
+            hash += std::to_string(emptyCount);
+        }
+        if (row < 7) {
+            hash += '/';
+        }
+    }
+
+    hash += (isWhiteTurn) ? " w" : " b";
+
+    return hash;
+}
+

@@ -5,15 +5,27 @@
 #include "Piece.h"
 #include <vector>
 #include <string>
+#include "ThreadPool.h"
+#include <chrono>
+#include "Chess.h"
+#include <unordered_map>
 
+
+
+
+
+
+class Chess;
 
 
 class GameBoard {
     Piece* board[8][8];
     bool isWhiteTurn;
 
+
 public:
     GameBoard(); 
+    GameBoard(const GameBoard& other);
     ~GameBoard();
 
     Piece* getPiece(int row, int col) const;
@@ -37,6 +49,14 @@ public:
     
     MoveScore minimax(int depth, bool isMaximizingPlayer);
     void undoMove(int fromRow, int fromCol, int toRow, int toCol, Piece* movedPiece, Piece* capturedPiece);
+
+    //third part
+
+    std::vector<std::pair<int, int>> getPlayerPieces(bool isWhite) const;
+    MoveScore getBestMoveMultithreaded(int depth, int numThreads);
+    void runAutoGame(Chess& chess, int depth, int numThreads);
+    std::string getCurrentPositionHash();
+   
     
 
     
